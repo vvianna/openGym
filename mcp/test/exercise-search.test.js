@@ -2,7 +2,7 @@
 // against the demo profile.
 import { describe, beforeAll, beforeEach, test, expect } from 'vitest'
 import { buildDemoState } from '../../frontend/src/lib/demoSeed.js'
-import { ensureNames, resolveExercise, resolveRoutine, searchExercises, localizedName, nameLangOf } from '../src/exercise-search.js'
+import { ensureNames, resolveExercise, resolveRoutine, searchExercises, localizedName, nameLangOf, findExercise, findExercises } from '../src/exercise-search.js'
 
 const BENCH = '0025'
 const INCLINE = '0047'
@@ -82,5 +82,37 @@ describe('resolveRoutine', () => {
     expect(e.code).toBe('EAMBIG')
     expect(e.candidates).toHaveLength(3)
     expect(code(() => resolveRoutine(S, 'Arms')).code).toBe('ENOENT')
+  })
+})
+
+describe('what the user typed is never a property lookup', () => {
+  test('"constructor", "__proto__", "toString" resolve to nothing, never to an exercise without an id', () => {
+    // A fuzzy hit on a real name is fine ("proto" is a subsequence of a few); what must never come
+    // back is Object's own property under that name — an exercise with no id and no name.
+    for (const q of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      let got = null
+      const e = code(() => { got = resolveExercise(S, q) })
+      if (e) { expect(['ENOENT', 'EAMBIG']).toContain(e.code); for (const c of e.candidates || []) expect(typeof c.id).toBe('string') }
+      else { expect(typeof got.id).toBe('string'); expect(typeof got.n).toBe('string'); expect(got.n).not.toBe('') }
+      for (const row of searchExercises(S, q)) { expect(typeof row.id).toBe('string'); expect(row.name_en).not.toBe('') }
+    }
+  })
+})
+
+describe('the any-language fallback', () => {
+  test('an English profile resolves a Portuguese name through every pack, and says which name matched', async () => {
+    S.lang = 'en'
+    expect(['ENOENT', 'EAMBIG']).toContain(code(() => resolveExercise(S, 'supino com barra'))?.code)
+    const ex = await findExercise(S, 'supino com barra')
+    expect(ex.id).toBe(BENCH)
+    const r = await findExercises(S, 'supino com barra')
+    expect(r.fallback).toBe(true)
+    expect(r.exercises[0]).toMatchObject({ id: BENCH, name_localized: null, name_matched: 'supino com barra' })
+    // The profile's own language still comes first when it has the name.
+    S.lang = 'pt-BR'
+    const own = await findExercises(S, 'supino com barra')
+    expect(own.fallback).toBe(false)
+    expect(own.exercises[0]).toMatchObject({ id: BENCH, name_localized: 'supino com barra' })
+    expect(own.exercises[0].name_matched).toBeUndefined()
   })
 })

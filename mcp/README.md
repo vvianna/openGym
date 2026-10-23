@@ -79,7 +79,8 @@ Add the server to your LLM client's MCP config. For Claude Desktop, edit
       "args": ["/absolute/path/to/openGym/mcp/src/index.js"],
       "env": {
         "OPENGYM_DATA": "/absolute/path/to/openGym/data",
-        "OPENGYM_UID": "<your-uid>"   // optional — auto-detected if you have one profile
+        "OPENGYM_UID": "<your-uid>",  // optional — auto-detected if you have one profile
+        "TZ": "America/Sao_Paulo"     // the user's zone: dates and "today" are read in it
       }
     }
   }
@@ -100,7 +101,16 @@ mcp_servers:
     env:
       OPENGYM_URL: "https://gym.example.com"
       OPENGYM_TOKEN_FILE: "/home/you/.opengym-mcp/token"
+      TZ: "America/Sao_Paulo"
 ```
+
+**Set `TZ` to the user's time zone.** Every date and time the server reads or writes (`today`,
+a `start` of `22:00`, which day a late session files under) is the zone the MCP process runs in,
+and a Docker host or a VPS is usually UTC — at 22:00 in São Paulo that is already tomorrow.
+`get_capabilities` reports the zone in use (`clock.timezone`, `clock.today`).
+
+A profile that has never synced from a device has no document on the server yet; the first
+write creates it with the app's defaults (unit kg) and says so in the result's `warnings`.
 
 For Cursor and other MCP-compatible clients, see the client's MCP docs — the same `command` +
 `args` + `env` shape is what every stdio MCP server expects.

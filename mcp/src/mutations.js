@@ -11,7 +11,7 @@
    (routines.js), refillAfter (rotation.js) — exactly the calls sheets.jsx makes. */
 import { uid } from '../../frontend/src/lib/format.js'
 import { buildCompletedWorkout } from '../../frontend/src/lib/finish-workout.js'
-import { backfillStart, backfillEnd, completeBackfill } from '../../frontend/src/lib/backfill.js'
+import { backfillStart, backfillEnd, completeBackfill, insertChronological } from '../../frontend/src/lib/backfill.js'
 import { rebuildPrHistory, moveWorkout, setWorkoutDuration, sameWorkout } from '../../frontend/src/lib/workout-date.js'
 import { editCompletedSession, saveWorkoutEdit, deleteEditedWorkout } from '../../frontend/src/lib/session-edit.js'
 import { stampWorkout } from '../../frontend/src/lib/sync-merge.js'
@@ -136,10 +136,16 @@ export function entriesOf(S, exercises, routine, ctx, warnings = []) {
 export function draftOf(S, args, ctx, warnings = []) {
   const date = args.date || ctx.todayIso
   const past = date !== ctx.todayIso
-  const durationMin = Math.min(1440, Math.max(1, Math.round(num(args.duration_min) || 60)))
   const start = args.start ? backfillStart(date, args.start)
     : past ? backfillStart(date, '18:00')
-      : ctx.now - durationMin * 60000
+      : ctx.now - Math.min(1440, Math.max(1, Math.round(num(args.duration_min) || 60))) * 60000
+  // Today with a start and no length: the session ran from that start until now ("comecei às
+  // 18:50" said at 19:00 is a ten-minute session, not an hour that ends in the future). A start
+  // still ahead of the clock is a mistake to report, not a session to file.
+  if (!past && args.start && start > ctx.now) throw coded('EINVAL', `start ${args.start} is later than now — the session cannot have started yet`)
+  const durationMin = args.duration_min != null ? Math.min(1440, Math.max(1, Math.round(num(args.duration_min))))
+    : !past && args.start ? Math.max(1, Math.round((ctx.now - start) / 60000))
+      : 60
   const routine = args.routine || null
   const entries = entriesOf(S, args.exercises, routine, ctx, warnings)
   const name = String(args.name || '').trim().slice(0, NAME_MAX) || (routine ? deriveSessionName([routine.name]) : null) || 'Workout'
@@ -154,6 +160,10 @@ export function draftOf(S, args, ctx, warnings = []) {
   if (gym) draft.gym = gym
   if (past) draft.backfill = { durationMin, replaceId: null }
   else draft.end = start + durationMin * 60000
+  // A start the caller named places the record by time; without one it is the session that just
+  // ended, appended like the app's own. The flag is the draft's only — buildCompletedWorkout
+  // writes none of it onto the record.
+  if (args.start) draft.placed = true
   return draft
 }
 
@@ -173,6 +183,16 @@ const snapshotFor = S => e => {
 export function logWorkout(S, draft, ctx) {
   const now = ctx.now
   const past = !!draft.backfill
+  // Already filed: a finish whose push landed but whose session file survived (the process
+  // died in between) is retried with the same draft id. The record is answered, not doubled —
+  // two workouts under one id would be merged into one on a device and deleted together.
+  const already = list(S.workouts).find(x => x && x.id === draft.id)
+  if (already) return { workout: already, prs: [...(already.prs || [])], e1rm_records: [], already_saved: true }
+  // The app's own guard on a logged session (workout-date.js endsInFuture): a start and a length
+  // that put the end ahead of the clock describe a session still going on. One minute of grace,
+  // since a live finish is filed as at least a minute long.
+  const end = past ? backfillEnd(draft) : draft.end
+  if (end > now + 60000) throw coded('EINVAL', `the session would end in the future (${new Date(end).toISOString()} with the start and duration given) — check start and duration_min`)
   const prs = []
   const e1prs = []
   if (!past) {
@@ -200,7 +220,7 @@ export function logWorkout(S, draft, ctx) {
     const mx = bestWeightForEntry(e)
     if (mx > 0 && beatsWeight(e.id, mx, (S.exWeights[e.id] || {}).w || 0)) S.exWeights[e.id] = { w: mx, d: w.d }
   }
-  S.workouts = [...list(S.workouts), w]
+  S.workouts = draft.placed ? insertChronological(list(S.workouts), w) : [...list(S.workouts), w]
   refillAfter(S, w, ctx.todayIso, now)
   return { workout: w, prs, e1rm_records: e1prs }
 }
@@ -224,6 +244,7 @@ export function updateWorkout(S, args, ctx) {
   const current = findWorkout(S, args.workout_id)
   const changed = []
   const warnings = args.warnings || []
+  warnings.length = 0   // a 409 retry runs this again; the warnings are this attempt's only
   if (S.active) throw coded('EINVAL', 'a session is open on this document; finish it first')
   let active
   try { active = editCompletedSession(S, current) } catch (e) { throw coded('ENOENT', e.message) }
@@ -265,11 +286,16 @@ export function updateWorkout(S, args, ctx) {
     const iso = args.date || ref.d
     const time = args.start || hhmmOf(ref.start)
     const moved = moveWorkout(S.workouts, ref, iso, time, now)
-    if (moved) { S.workouts = moved; ref = S.workouts.find(x => sameWorkout(x, saved)); changed.push(args.date !== undefined ? 'date' : 'start') }
+    if (moved) {
+      S.workouts = moved; ref = S.workouts.find(x => sameWorkout(x, saved))
+      // `changed` names the input fields, as the description promises.
+      if (args.date !== undefined) changed.push('date')
+      if (args.start !== undefined) changed.push('start')
+    }
   }
   if (args.duration_min !== undefined) {
     const next = setWorkoutDuration(S.workouts, ref, args.duration_min, now)
-    if (next) { S.workouts = next; ref = S.workouts.find(x => sameWorkout(x, saved)); changed.push('duration') }
+    if (next) { S.workouts = next; ref = S.workouts.find(x => sameWorkout(x, saved)); changed.push('duration_min') }
   }
   return { workout: ref, changed, warnings }
 }
@@ -318,7 +344,7 @@ export function setExerciseNote(S, { id, note }) {
 // One tool-level exercise → the cfg a routine stores. `mode` is the exercise's own unless the
 // numbers say otherwise (seconds → time, minutes → cardio); a rep range is stored as its top
 // (`reps`) and bottom (`repsMin`), the way the editor does (rep-range.js).
-function cfgOf(x) {
+function cfgOf(x, { creating = true } = {}) {
   const ex = x.ex
   const cfg = { id: ex.id, sets: Math.max(1, Math.min(20, Math.round(num(x.sets) || 3))) }
   const mode = x.sec != null ? 'time' : x.min != null ? 'cardio' : modeOf({ id: ex.id })
@@ -331,7 +357,7 @@ function cfgOf(x) {
     if (x.reps_max != null && x.reps_min == null && x.reps != null && x.reps < x.reps_max) Object.assign(cfg, normalizeRepRange(x.reps_max, x.reps))
   }
   if (x.weight != null) cfg.weight = num(x.weight)
-  else if (mode === 'reps') cfg.weight = 0
+  else if (mode === 'reps' && creating) cfg.weight = 0   // an update keeps the stored weight
   if (x.rest_sec != null) cfg.restSec = Math.max(0, Math.round(num(x.rest_sec)))
   if (x.superset_group != null && String(x.superset_group).trim()) cfg.sg = 'sg-' + String(x.superset_group).trim()
   if (x.progression) cfg.prog = x.progression
@@ -370,12 +396,18 @@ export function editRoutine(S, args, ctx) {
   if (args.exercises) {
     if (!args.exercises.length) throw coded('EINVAL', 'a routine needs at least one exercise — use remove: true to delete it')
     // A slot kept for the same exercise keeps what the editor stored beyond what the tool knows
-    // (pyramid, deload factor, increment…); only the fields given move.
+    // (pyramid, deload factor, increment, weight…); the fields given move. What the given numbers
+    // say about the slot's shape wins over what it had: `reps` alone clears a stored rep range,
+    // and a slot moved to another mode (sec → timed, min → cardio, reps → reps) drops the other
+    // modes' numbers rather than carrying them beside the new ones.
     const old = list(r.ex)
     r.ex = args.exercises.map(x => {
-      const cfg = cfgOf(x)
+      const cfg = cfgOf(x, { creating: false })
       const prev = old.find(c => c && c.id === cfg.id)
-      return prev ? { ...prev, ...cfg } : cfg
+      if (!prev) return cfg
+      const kept = { ...prev }
+      for (const k of ['mode', 'reps', 'repsMin', 'repsMax', 'sec', 'min', 'speed']) delete kept[k]
+      return { ...kept, ...cfg }
     })
   }
   S.routines[idx] = r

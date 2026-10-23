@@ -155,22 +155,22 @@ describe('a fresh profile over the real api', () => {
     expect(c.tools.session.map(t => t.name)).toContain('finish_workout')
   })
 
-  // KNOWN DEFECT, kept visible: a profile that never synced from a device has no document, and
-  // every write tool refuses with ENOENT ("sign in on a device once") although PUT /api/data
-  // would create the document from the defaults mutate() already builds over a null read. The
-  // test is marked `fails` so the suite stays green until the guard is lifted — once it is, this
-  // test fails and should become a plain `test`, asserting `_rev` 1 on disk.
-  test.fails('log_workout on a profile with no document yet creates it (currently refused with ENOENT)', async () => {
+  // A profile that never synced from a device has no document: the first write creates it from
+  // the app's defaults (PUT /api/data accepts that) and says so, since the unit is the default's.
+  test('log_workout on a profile with no document yet creates it and says so', async () => {
     const r = await call('log_workout', { exercises: [{ exercise: '0025', sets: [{ w: 60, r: 10 }] }] })
     expect(r.ok).toBe(true)
+    expect(r.warnings.some(w => /no synced document/.test(w))).toBe(true)
     expect(onDisk()._rev).toBe(1)
+    expect(onDisk().workouts).toHaveLength(1)
+    rev = 1
   })
 
-  test('the phone signs in and pushes the first document (unit kg, Portuguese names on)', async () => {
+  test('the phone signs in and pushes its own first document over it (unit kg, Portuguese names on)', async () => {
     const r = await phoneWrites(S => { Object.assign(S, { unit: 'kg', lang: 'pt-BR', routines: [], workouts: [], bodyweight: [], exWeights: {}, customEx: [] }) })
-    expect(r.rev).toBe(1)
-    rev = 1
-    expect(onDisk()._rev).toBe(1)
+    expect(r.rev).toBe(rev + 1)
+    rev = r.rev
+    expect(onDisk()._rev).toBe(rev)
     await state.refresh(true)
     expect((await call('get_capabilities')).profile.lang).toBe('pt-BR')
   })
@@ -293,7 +293,7 @@ describe('update_workout and delete_workout', () => {
 
   test('update_workout can move the date, retime and rename without touching the sets', async () => {
     const r = await call('update_workout', { workout_id: pastId, date: '2026-01-12', start: '07:30', duration_min: 45, name: 'Treino A' })
-    expect(r.changed).toEqual(expect.arrayContaining(['date', 'duration', 'name']))
+    expect(r.changed).toEqual(expect.arrayContaining(['date', 'start', 'duration_min', 'name']))
     const w = onDisk().workouts.find(x => x.id === pastId)
     expect(w).toMatchObject({ d: '2026-01-12', name: 'Treino A' })
     expect(w.end - w.start).toBe(45 * 60000)

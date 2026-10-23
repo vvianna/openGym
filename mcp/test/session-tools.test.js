@@ -278,6 +278,80 @@ describe('failure cases', () => {
     expect((await call('get_active_workout')).done_sets).toBe(1)
   })
 
+  test('a finish retried after its push landed answers the saved record once, and closes the session', async () => {
+    await call('start_workout', { routine: 'Push Day', gym: 'Iron' })
+    await call('log_set', { r: 10 })
+    const draftText = fs.readFileSync(file(), 'utf8')          // what a crash between PUT and unlink leaves behind
+    const f1 = await call('finish_workout', {})
+    expect(f1.ok).toBe(true)
+    const writes = be.writes.length
+    fs.writeFileSync(file(), draftText)
+    const f2 = await call('finish_workout', {})
+    expect(f2).toMatchObject({ ok: true, workout_id: f1.workout_id, already_saved: true, session: 'closed' })
+    expect(f2.warnings.some(w => /already been saved/.test(w))).toBe(true)
+    expect(be.writes).toHaveLength(writes)                       // nothing pushed a second time
+    expect(be.doc.workouts.filter(w => w.id === f1.workout_id)).toHaveLength(1)
+    expect(fs.existsSync(file())).toBe(false)
+  })
+
+  test('a planned per-side set is logged on both limbs; an odd rep count is refused', async () => {
+    be.deviceWrites(s => { s.routines.find(r => r.name === 'Push Day').ex[0].side = true })
+    await refresh(true)
+    const o = await call('start_workout', { routine: 'Push Day' })
+    const raw0 = loadSession('u-test').entries[0].sets[0]
+    expect(raw0.sides && raw0.sides.L && raw0.sides.R, 'the builder made a per-side row').toBeTruthy()
+    await rejects(call('log_set', { r: 7 }), 'EINVAL', /even rep count/)
+    const l = await call('log_set', { r: 16, w: 20, rir: 2 })
+    expect(l.set).toMatchObject({ done: true, r: 16, w: 20, rir: 2 })
+    const raw = loadSession('u-test').entries[0].sets[0]
+    expect(raw.sides.L).toMatchObject({ w: 20, r: 8, done: true, rir: 2 })
+    expect(raw.sides.R).toMatchObject({ w: 20, r: 8, done: true, rir: 2 })
+    expect(raw).toMatchObject({ done: true, r: 16, w: 20 })
+    expect(o.exercises[0].id).toBe(loadSession('u-test').entries[0].id)
+  })
+
+  test('a planned drop-set keeps its drops when ticked as planned, and is a plain set (with a warning) when numbers are given', async () => {
+    await call('start_workout', { routine: 'Push Day' })
+    const s0 = loadSession('u-test')
+    for (const row of s0.entries[0].sets) { row.type = 'dropset'; row.drops = [{ w: 30, r: 5 }] }
+    fs.writeFileSync(file(), JSON.stringify(s0))
+    const kept = await call('log_set', {})
+    expect(kept.warnings).toEqual([])
+    const r1 = loadSession('u-test').entries[0].sets[0]
+    expect(r1).toMatchObject({ done: true, type: 'dropset', drops: [{ w: 30, r: 5 }] })
+    const plain = await call('log_set', { w: 50, r: 8 })
+    expect(plain.warnings.some(w => /dropset/.test(w))).toBe(true)
+    const r2 = loadSession('u-test').entries[0].sets[1]
+    expect(r2).toMatchObject({ done: true, w: 50, r: 8 })
+    expect(r2.drops).toBeUndefined()
+    expect(r2.type).toBeUndefined()
+  })
+
+  test('remote mode with no profile yet resolved: the session tools surface the server\'s error, and file nothing under no id', async () => {
+    _setBackendForTests(be, { id: null, name: 'Profile' })
+    be.failNext = 'EAUTH'
+    await rejects(call('start_workout', {}), 'EAUTH')
+    expect(fs.existsSync(file())).toBe(false)
+    // Once the server answers, the same call files the draft under the real id.
+    const o = await call('start_workout', {})
+    expect(o.open).toBe(true)
+    expect(fs.existsSync(file())).toBe(true)
+  })
+
+  test('a profile with no document yet can run a session; finishing creates the document and says so', async () => {
+    be = fakeBackend(null, { user: { id: 'u-new', name: 'Nova' } })
+    _setBackendForTests(be, { id: 'u-new', name: 'Nova' })
+    await refresh(true)
+    await call('start_workout', { gym: 'Iron' })
+    await call('log_set', { exercise: BENCH, w: 40, r: 10 })
+    const f = await call('finish_workout', {})
+    expect(f.ok).toBe(true)
+    expect(f.warnings.some(w => /no synced document/.test(w))).toBe(true)
+    expect(be.doc.workouts).toHaveLength(1)
+    expect(be.doc.workouts[0]).toMatchObject({ gym: 'Iron' })
+    expect(fs.existsSync(file())).toBe(false)
+  })
+
   test('schema: the documented examples parse; a bad set index, direction or action is refused', () => {
     expect(parse('start_workout', { routine: 'Push Day', gym: 'Iron', date: '2026-07-20', start: '18:30' }).success).toBe(true)
     expect(parse('start_workout', { date: '2026-02-30' }).success).toBe(false)

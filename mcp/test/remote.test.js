@@ -5,7 +5,7 @@ import { describe, test, expect, afterEach } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { createRemoteBackend, redeemPairCode, writeTokenFile } from '../src/remote.js'
+import { createRemoteBackend, redeemPairCode, writeTokenFile, ME_EVERY_MS } from '../src/remote.js'
 
 const dirs = []
 afterEach(() => { dirs.splice(0).forEach(d => fs.rmSync(d, { recursive: true, force: true })) })
@@ -97,6 +97,22 @@ describe('createRemoteBackend', () => {
     expect(be.token).toBe('renewed-2')
     expect(logged).toHaveLength(1)
     expect(logged[0]).toMatch(/OPENGYM_TOKEN_FILE/)
+  })
+
+  test('a long-running process asks GET /api/me again every ME_EVERY_MS, so a renewal is taken before the token dies', async () => {
+    let now = 1_000_000
+    const { fetchImpl, calls } = stubFetch([ME, DOC, DOC, [200, { user: { id: 'u1', name: 'V' }, token: 'renewed' }], DOC])
+    const be = createRemoteBackend({ url: 'https://gym.example.com', token: 'tok-1', fetchImpl, log: () => {}, clock: () => now })
+    await be.read()
+    now += ME_EVERY_MS - 1
+    await be.read()                                   // inside the window: no second /api/me
+    expect(calls.filter(c => c.url.endsWith('/api/me'))).toHaveLength(1)
+    now += 2
+    await be.read()                                   // past it: /api/me again, renewal adopted
+    expect(calls.filter(c => c.url.endsWith('/api/me'))).toHaveLength(2)
+    expect(calls.at(-1).headers.Authorization).toBe('Bearer renewed')
+    expect(be.token).toBe('renewed')
+    expect(ME_EVERY_MS).toBe(12 * 60 * 60 * 1000)
   })
 })
 

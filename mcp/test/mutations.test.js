@@ -96,12 +96,37 @@ describe('logWorkout — today (the live path)', () => {
     expect(r.prs).toEqual([])
   })
 
-  test('an explicit start on today keeps the live path with that start', () => {
+  test('an explicit start on today keeps the live path with that start, filed in time order', () => {
+    const later = log({ exercises: [{ id: BENCH, sets: [{ w: 40, r: 10 }] }] })   // the session that just ended
     const r = log({ start: '07:15', duration_min: 45, exercises: [{ id: BENCH, sets: [{ w: 40, r: 10 }] }] })
     const d = new Date(r.workout.start)
     expect([d.getHours(), d.getMinutes()]).toEqual([7, 15])
     expect(r.workout.end - r.workout.start).toBe(45 * 60000)
-    expect(S.workouts.at(-1)).toBe(r.workout)
+    // A start the caller named places the record by time: the morning session goes before the
+    // one logged a moment ago, not after it — History reads the array's order.
+    const at = S.workouts.indexOf(r.workout)
+    expect(at).toBeLessThan(S.workouts.indexOf(later.workout))
+    expect(S.workouts.slice(at + 1).every(w => w.d > r.workout.d || (w.d === r.workout.d && w.start >= r.workout.start))).toBe(true)
+    expect(S.workouts.at(-1)).toBe(later.workout)
+    expect(S.exWeights[BENCH].d).toBe(FAKE_TODAY_ISO)
+  })
+
+  test('a start with no length runs until now; a future start or end is EINVAL', () => {
+    const r = log({ start: '18:30', exercises: [{ id: BENCH, sets: [{ w: 40, r: 10 }] }] })
+    expect(r.workout.end).toBe(ctx().now)
+    expect(r.workout.end - r.workout.start).toBe(30 * 60000)
+    expect(() => log({ start: '23:30', exercises: [{ id: BENCH, sets: [{ w: 40, r: 10 }] }] })).toThrow(expect.objectContaining({ code: 'EINVAL', message: expect.stringMatching(/later than now/) }))
+    expect(() => log({ start: '18:30', duration_min: 90, exercises: [{ id: BENCH, sets: [{ w: 40, r: 10 }] }] })).toThrow(expect.objectContaining({ code: 'EINVAL', message: expect.stringMatching(/end in the future/) }))
+  })
+
+  test('a draft whose id is already filed is answered, not filed twice', () => {
+    const r = log({ exercises: [{ id: BENCH, sets: [{ w: 40, r: 10 }] }] })
+    const n = S.workouts.length
+    const draft = { ...draftOf(S, { exercises: [{ ex: ex(BENCH), sets: [{ w: 99, r: 1 }] }] }, ctx()), id: r.workout.id }
+    const again = logWorkout(S, draft, ctx())
+    expect(again.already_saved).toBe(true)
+    expect(again.workout).toBe(r.workout)
+    expect(S.workouts).toHaveLength(n)
   })
 
   test('a set with every number at zero is EINVAL, not a logged set of nothing', () => {
@@ -196,7 +221,7 @@ describe('updateWorkout', () => {
     const d = new Date(u2.workout.start)
     expect([d.getHours(), d.getMinutes()]).toEqual([8, 30])
     expect(u2.workout.end - u2.workout.start).toBe(30 * 60000)
-    expect(u2.changed).toEqual(['date', 'duration'])
+    expect(u2.changed).toEqual(['date', 'start', 'duration_min'])
     expect(S.workouts.filter(w => w.id === r.workout.id)).toHaveLength(1)
     expect(S.workouts.findIndex(w => w.id === r.workout.id)).toBeLessThan(S.workouts.length - 1)
   })
@@ -292,6 +317,20 @@ describe('editRoutine', () => {
     expect(saved.name).toBe('Push A')
     expect(saved.ex.map(c => c.id)).toEqual([BENCH, PLANK])
     expect(saved.ex[0]).toMatchObject({ sets: 5, reps: 5, inc: 2.5 })
+  })
+
+  test('updating keeps a stored weight, clears a rep range when plain reps are sent, and drops the old mode\'s numbers', () => {
+    const r0 = pushDay()
+    const slot = r0.ex.find(c => c.id === BENCH)
+    slot.weight = 62.5; slot.reps = 12; slot.repsMin = 8
+    editRoutine(S, { routine: r0, exercises: [{ ex: ex(BENCH), sets: 4, reps: 6 }] }, ctx())
+    let saved = S.routines.find(x => x.id === r0.id).ex[0]
+    expect(saved).toMatchObject({ sets: 4, reps: 6, weight: 62.5 })
+    expect(saved.repsMin).toBeUndefined()
+    editRoutine(S, { routine: r0, exercises: [{ ex: ex(BENCH), sec: 40 }] }, ctx())
+    saved = S.routines.find(x => x.id === r0.id).ex[0]
+    expect(saved).toMatchObject({ mode: 'time', sec: 40, weight: 62.5 })
+    expect(saved.reps).toBeUndefined()
   })
 
   test('removing takes the routine off the weekday plan too; creating without a name or exercises is EINVAL', () => {

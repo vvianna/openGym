@@ -35,7 +35,7 @@ const rejects = async (p, code, re) => {
   let err = null
   try { await p } catch (e) { err = e }
   expect(err, 'expected a thrown error').toBeTruthy()
-  expect(err.code).toBe(code)
+  if (code !== undefined) expect(err.code).toBe(code)
   if (re) expect(err.message).toMatch(re)
   return err
 }
@@ -251,6 +251,81 @@ describe('add_bodyweight / set_exercise_note / edit_routine', () => {
     expect(be.doc.routines.some(r => r.name === 'Glúteos')).toBe(false)
     await rejects(call('edit_routine', { routine: 'Day', name: 'x' }), 'EAMBIG', /routines/)
     await rejects(call('edit_routine', { exercises: [{ exercise: BENCH }] }), 'EINVAL', /name/)
+  })
+})
+
+describe('after the review: retries, fresh profiles, the cache, the fallback search', () => {
+  test('a 409 retry does not double the warnings', async () => {
+    be.conflictsLeft = 1
+    const r = await call('log_workout', { exercises: [{ exercise: LEG_PRESS, sets: [{ plates: 10, r: 12 }] }] })
+    expect(r.ok).toBe(true)
+    expect(r.warnings).toHaveLength(1)
+  })
+
+  test('a profile with no document yet: the first write creates it with the defaults and says so', async () => {
+    be = fakeBackend(null, { user: { id: 'u-new', name: 'Nova' } })
+    _setBackendForTests(be, { id: 'u-new', name: 'Nova' })
+    await refresh(true)
+    expect(getState()).toBeNull()
+    const r = await call('log_workout', { gym: 'Iron', exercises: [{ exercise: BENCH, sets: [{ w: 60, r: 10 }] }] })
+    expect(r.ok).toBe(true)
+    expect(r.warnings.some(w => /no synced document/.test(w))).toBe(true)
+    expect(be.doc).toMatchObject({ unit: 'kg', _rev: 1 })
+    expect(be.doc.workouts).toHaveLength(1)
+    expect(be.doc.workouts[0]).toMatchObject({ gym: 'Iron' })
+    // The next write finds a document and says nothing of the kind.
+    const b = await call('add_bodyweight', { weight: 80 })
+    expect(b.warnings).toEqual([])
+    expect(be.doc.bodyweight).toHaveLength(1)
+    // What needs history to correct still says there is none to correct.
+    be = fakeBackend(null, { user: { id: 'u-new2', name: 'Nova' } })
+    _setBackendForTests(be, { id: 'u-new2', name: 'Nova' })
+    await refresh(true)
+    await rejects(call('update_workout', { workout_id: 'x', note: 'y' }), 'ENOENT', /no state/)
+    const n = await call('set_exercise_note', { exercise: BENCH, note: '1 placa = 5 kg' })
+    expect(n.warnings.some(w => /no synced document/.test(w))).toBe(true)
+    expect(be.doc.exNotes[BENCH]).toBe('1 placa = 5 kg')
+  })
+
+  test('the cache is re-read on the next call after a write, not trusted past the write that made it', async () => {
+    const r = await call('log_workout', { exercises: [{ exercise: BENCH, sets: [{ w: 60, r: 10 }] }] })
+    expect(getState().workouts.some(w => w.id === r.workout_id)).toBe(true)   // this call's read-back
+    const reads = be.reads
+    await refresh()                                                              // what index.js does next
+    expect(be.reads).toBe(reads + 1)
+  })
+
+  test('search_exercises on an English profile still finds a Portuguese name, through every language', async () => {
+    be.deviceWrites(s => { s.lang = 'en' })
+    await refresh(true)
+    const r = await call('search_exercises', { query: 'supino com barra' })
+    expect(r.lang).toBe('en')
+    expect(r.matched_other_language).toBe(true)
+    expect(r.exercises[0]).toMatchObject({ id: BENCH, name_localized: null, name_matched: 'supino com barra' })
+    const w = await call('log_workout', { exercises: [{ exercise: 'supino com barra', sets: [{ w: 60, r: 10 }] }] })
+    expect(w.exercises[0].id).toBe(BENCH)
+  })
+
+  test('"constructor" is not an exercise anywhere a name is taken', async () => {
+    expect((await call('search_exercises', { query: 'constructor' })).exercises.every(e => typeof e.id === 'string' && e.name_en)).toBe(true)
+    // Whatever a fuzzy pass makes of these, what is written has a catalogue id — never Object's own.
+    for (const q of ['constructor', '__proto__', 'hasOwnProperty']) {
+      let r = null, e = null
+      try { r = await call('log_workout', { exercises: [{ exercise: q, sets: [{ w: 1, r: 1 }] }] }) } catch (x) { e = x }
+      if (e) expect(['ENOENT', 'EAMBIG']).toContain(e.code)
+      else { expect(typeof r.exercises[0].id).toBe('string'); expect(r.exercises[0].name).toBeTruthy() }
+    }
+    for (const w of be.doc.workouts) for (const en of w.entries) expect(typeof en.id).toBe('string')
+    expect(Object.keys(be.doc.exNotes || {}).every(k => typeof k === 'string' && k !== 'undefined')).toBe(true)
+  })
+
+  test('edit_routine: confirm must be literally true; a start with no duration runs until now', async () => {
+    expect(parse('edit_routine', { routine: 'Push Day', remove: true, confirm: false }).success).toBe(false)
+    expect(parse('edit_routine', { routine: 'Push Day', remove: true, confirm: true }).success).toBe(true)
+    const r = await call('log_workout', { start: '18:40', exercises: [{ exercise: BENCH, sets: [{ w: 60, r: 10 }] }] })
+    expect(r.duration).toBe('20 min')
+    await rejects(call('log_workout', { start: '19:30', exercises: [{ exercise: BENCH, sets: [{ w: 60, r: 10 }] }] }), 'EINVAL', /later than now/)
+    await rejects(call('log_workout', { start: '18:40', duration_min: 60, exercises: [{ exercise: BENCH, sets: [{ w: 60, r: 10 }] }] }), 'EINVAL', /end in the future/)
   })
 })
 

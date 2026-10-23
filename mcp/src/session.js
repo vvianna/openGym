@@ -5,12 +5,28 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { getUser, getMode, refresh } from './state.js'
+import { coded } from './schema.js'
 
 const safe = s => String(s || 'profile').replace(/[^a-zA-Z0-9_-]/g, '')
+
+/**
+ * The profile id the draft is filed under. In remote mode the id comes from the server (GET
+ * /api/me), so a process whose first read failed has none yet: it is asked for again here, and
+ * the failure that answers (EAUTH, ENET…) is the tool's error — never a draft filed under no id
+ * that a later, successful read would then not find.
+ */
+export async function resolvedUid() {
+  let u = getUser()
+  if (u.id == null && getMode() === 'remote') { await refresh(true); u = getUser() }
+  if (u.id == null) throw coded('EIO', 'the profile is not known yet — the server has not answered GET /api/me')
+  return u.id
+}
 
 /** Where the draft is kept: OPENGYM_SESSION_FILE, else ~/.opengym-mcp/active-<uid>.json — the
  *  home directory rather than tmp, so a reboot or a tmp cleaner cannot lose a half-logged session. */
 export function sessionFile(uid) {
+  if (uid == null) throw coded('EIO', 'no profile id for the session file — resolvedUid() first')
   const env = (process.env.OPENGYM_SESSION_FILE || '').trim()
   return env || path.join(os.homedir(), '.opengym-mcp', `active-${safe(uid)}.json`)
 }

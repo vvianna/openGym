@@ -57,6 +57,19 @@ describe('get_capabilities', () => {
   })
 })
 
+describe('the clock', () => {
+  test('reports the zone and the day this server reads dates in, and warns about it', () => {
+    _seedStateForTests(buildDemoState())
+    const c = capabilitiesOf(GROUPS)
+    expect(typeof c.clock.timezone).toBe('string')
+    expect(c.clock.today).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    expect(c.clock.now).toMatch(/Z$/)
+    expect(c.limitations.some(l => /time zone/.test(l))).toBe(true)
+    expect(c.limitations.some(l => /no document/.test(l))).toBe(true)
+    expect(INSTRUCTIONS).toMatch(/clock\.timezone/)
+  })
+})
+
 describe('instructions and guide', () => {
   test('the instructions name get_capabilities, search_exercises and every write tool', () => {
     expect(INSTRUCTIONS).toMatch(/get_capabilities/)

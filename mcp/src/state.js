@@ -182,7 +182,6 @@ export function getUser() {
 
 export const dataDir = () => DATA_DIR
 export const getMode = () => { init(); return _mode }
-export const getBackend = () => _backend
 export const writesEnabled = () => getMode() === 'remote'
 
 // The document as a tool sees it: the server's copy over the app's defaults, the way the
@@ -213,8 +212,15 @@ export async function ready() { await refresh(true); return getUser() }
  * on the revision that copy was read at. `fn` mutates `S` in place (or returns a replacement) and
  * may return a value. One retry on ECONFLICT, re-applying `fn` to the document the 409 carried;
  * a second conflict propagates. Returns { state, result, rev, wid }, `state` being the pushed
- * document — what a tool reads its own write back from. Serialised: two mutations in one process
- * never interleave. In file mode throws EPERM before reading anything.
+ * document — what a tool reads its own write back from. A `fn` that returns `{ skip: true,
+ * result }` found nothing to change (the record is already there): nothing is pushed and `state`
+ * is the document as read. Serialised: two mutations in one process never interleave. In file
+ * mode throws EPERM before reading anything.
+ *
+ * After a push the cache holds the pushed document for the tool's own read-back, but marked
+ * stale: the next tool call re-reads. The server may store one revision further than it answers
+ * (a field it put back — api/server.js, `report.changed`), so the pushed copy is not trusted past
+ * the call that produced it.
  */
 export function mutate(fn, { label = 'write', now } = {}) {
   init()
@@ -228,16 +234,22 @@ export function mutate(fn, { label = 'write', now } = {}) {
       const at = now ?? Date.now()
       const ctx = { now: at, todayIso: localIso(new Date(at)), unit: S.unit || 'kg' }
       const out = fn(S, ctx)
-      const next = out && typeof out === 'object' && !Array.isArray(out) && 'state' in out ? out.state : S
-      const result = out && typeof out === 'object' && !Array.isArray(out) && 'state' in out ? out.result : out
+      const wrapped = out && typeof out === 'object' && !Array.isArray(out) && ('state' in out || out.skip === true)
+      if (wrapped && out.skip === true) {
+        // Nothing to write: the document as read is what the tool reads back, unchanged.
+        return { state: S, result: out.result, rev: base.rev, wid: base.wid || null, skipped: true, created: false }
+      }
+      const next = wrapped ? out.state : S
+      const result = wrapped ? out.result : out
       try {
         const w = await _backend.write(next, { baseRev: base.rev, baseWid: base.wid })
-        // The pushed document is the new cache; the server's own bookkeeping (_rev, _wid) rides
-        // on it so a read within the TTL reports the revision this write produced.
+        // The pushed document serves this call's read-back; `at: 0` makes the next tool call
+        // re-read instead of trusting it (see above).
         const pushed = structuredClone(next)
         pushed._rev = w.rev; if (w.wid) pushed._wid = w.wid
-        _remote = { state: pushed, rev: w.rev, wid: w.wid || null, user: base.user || _remote.user, at: Date.now() }
-        return { state: pushed, result, rev: w.rev, wid: w.wid || null }
+        _remote = { state: pushed, rev: w.rev, wid: w.wid || null, user: base.user || _remote.user, at: 0 }
+        // `created`: the profile had no document before this write (the server made one).
+        return { state: pushed, result, rev: w.rev, wid: w.wid || null, created: base.state == null }
       } catch (e) {
         if (e.code !== 'ECONFLICT' || attempt >= 1) {
           if (e.code === 'ECONFLICT') e.message = `${label}: the profile was written by another device twice while this write was in flight — try again in a moment`
@@ -256,7 +268,7 @@ export function mutate(fn, { label = 'write', now } = {}) {
 
 // Test-only: a fake backend ({ read, write, me? }) stands in for the network; mode becomes remote.
 export function _setBackendForTests(backend, user = { id: 'test-uid', name: 'Test' }) {
-  _uid = user.id
+  _uid = user.id ?? (backend ? 'remote' : null)   // a remote profile not yet named by the server
   _db = { users: [user], creds: [], subs: [], invites: [] }
   _backend = backend
   _mode = backend ? 'remote' : 'file'

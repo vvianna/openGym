@@ -8,16 +8,16 @@
    EPERM writes unavailable in file mode · EAUTH token refused · ECONFLICT concurrent write ·
    ENET unreachable · EIO server or file fault. */
 import { z } from 'zod'
-import { getState, getUser, mutate, writesEnabled, getMode } from './state.js'
+import { getState, mutate, writesEnabled, getMode } from './state.js'
 import { isoDate, hhmm, coded } from './schema.js'
 import { setLabel, friendlyDuration } from './labels.js'
 import { getRoutine } from './tools.js'
-import { ensureNames, resolveExercise, resolveRoutine, searchExercises, exerciseRow, nameLangOf, BODYPARTS } from './exercise-search.js'
+import { findExercise, findExercises, resolveRoutine, exerciseRow, nameLangOf, BODYPARTS } from './exercise-search.js'
 import {
   draftOf, entriesOf, logWorkout, updateWorkout, deleteWorkout, addBodyweight, setExerciseNote, editRoutine,
   platesFactorOf, findWorkout, GYM_MAX, NAME_MAX
 } from './mutations.js'
-import { loadSession } from './session.js'
+import { loadSession, resolvedUid } from './session.js'
 import { exerciseHistory } from '../../frontend/src/lib/exercise-history.js'
 import { best1RM, formulaOf } from '../../frontend/src/lib/onerm.js'
 import { bestWeightFor, exNoteFor, pinnedNoteFor, modeOf, workoutVolume, setsDone, NOTE_MAX } from '../../frontend/src/lib/history.js'
@@ -28,9 +28,15 @@ import { exOr } from '../../frontend/src/lib/exercises.js'
 
 const ERRORS = 'Errors: ENOENT (not found), EINVAL (bad input), EAMBIG (ambiguous name — the error lists candidates; ask the user or pick, never guess), EPERM (writes need remote mode: OPENGYM_URL + OPENGYM_TOKEN), EAUTH (token refused — pair again), ECONFLICT (another device wrote at the same moment — retry once), ENET (server unreachable), EIO (server fault).'
 
-const noState = () => coded('ENOENT', 'no state for this profile yet — sign in on a device once so the api has a document to write to')
+const noState = () => coded('ENOENT', 'no state for this profile yet — sign in on a device once, or log something: the first write creates the document')
 const needsWrites = label => { if (!writesEnabled()) throw coded('EPERM', `${label}: writes need remote mode — set OPENGYM_URL and OPENGYM_TOKEN (file mode can only read; the openGym api is the only writer of the state file)`) }
-const user = () => getUser()
+// A profile that never synced from a device has no document; a write creates it from the app's
+// defaults (PUT /api/data accepts that), and says so, since the unit it chose is the default.
+const CREATED = 'this profile had no synced document yet; the write created it with the app\'s defaults (unit kg) — the phone adopts it on its next sync'
+const createdWarning = (out, warnings) => { if (out.created) warnings.push(CREATED); return warnings }
+// The document the resolvers read before a write: the cache, or nothing yet (a profile with no
+// document resolves against the catalogue alone).
+const current = () => getState() || {}
 
 // The set schema every exercise list shares: one row = one set, only the fields that apply.
 const setSchema = () => z.object({
@@ -70,8 +76,9 @@ const routineExerciseSchema = () => z.object({
 
 // Resolve every exercise of a list up front, so a bad name fails before anything is written.
 async function resolveAll(S, exercises) {
-  await ensureNames(S)
-  return exercises.map(x => ({ ...x, ex: resolveExercise(S, x.exercise) }))
+  const out = []
+  for (const x of exercises) out.push({ ...x, ex: await findExercise(S, x.exercise) })
+  return out
 }
 
 // A set row as the LLM reads it back — the same shape get_workout's entries use.
@@ -130,8 +137,8 @@ export function workoutResult(S, w, { prs = [], e1rm = [], warnings = [], rev, e
   }
 }
 
-const openSessionGuard = () => {
-  const s = loadSession(user().id)
+const openSessionGuard = async () => {
+  const s = loadSession(await resolvedUid())
   if (s) throw coded('EINVAL', `a live session started ${s.started_at || 'earlier'}${s.name ? ` ("${s.name}")` : ''} is open — finish_workout or discard_workout it first, or log its sets with log_set`)
 }
 
@@ -147,10 +154,15 @@ export const searchExercisesTool = {
     limit: z.number().int().min(1).max(25).optional().describe('Max results, default 8.')
   },
   handler: async ({ query, body_part, equipment, limit }) => {
-    const S = getState() || {}
-    await ensureNames(S)
-    const exercises = searchExercises(S, query, { bodyPart: body_part || null, equipment: equipment || null, limit: limit || 8 })
-    return { query, lang: nameLangOf(S) || 'en', count: exercises.length, exercises }
+    const S = current()
+    const { exercises, fallback } = await findExercises(S, query, { bodyPart: body_part || null, equipment: equipment || null, limit: limit || 8 })
+    return {
+      query, lang: nameLangOf(S) || 'en', count: exercises.length,
+      // Every language's names are searched; a hit that came through another language's name
+      // carries `name_matched`, and the flag says the top one did.
+      ...(fallback ? { matched_other_language: true } : {}),
+      exercises
+    }
   }
 }
 
@@ -171,17 +183,18 @@ export const logWorkoutTool = {
   },
   handler: async (args) => {
     needsWrites('log_workout')
-    openSessionGuard()
-    const S0 = getState()
-    if (!S0) throw noState()
+    await openSessionGuard()
+    const S0 = current()
     const exercises = await resolveAll(S0, args.exercises)
     const routine = args.routine ? resolveRoutine(S0, args.routine) : null
     const warnings = []
-    const { state, result, rev } = await mutate((S, ctx) => {
+    const out = await mutate((S, ctx) => {
+      warnings.length = 0   // a 409 retry runs this again; the warnings are this attempt's only
       const draft = draftOf(S, { ...args, exercises, routine }, ctx, warnings)
       return logWorkout(S, draft, ctx)
     }, { label: 'log_workout' })
-    return workoutResult(state, result.workout, { prs: result.prs, e1rm: result.e1rm_records, warnings, rev })
+    const { state, result, rev } = out
+    return workoutResult(state, result.workout, { prs: result.prs, e1rm: result.e1rm_records, warnings: createdWarning(out, warnings), rev })
   }
 }
 
@@ -203,7 +216,7 @@ export const updateWorkoutTool = {
   handler: async (args) => {
     needsWrites('update_workout')
     const S0 = getState()
-    if (!S0) throw noState()
+    if (!S0) throw noState()   // nothing to correct on a profile with no document
     const fields = ['exercises', 'note', 'name', 'gym', 'date', 'start', 'duration_min'].filter(k => args[k] !== undefined)
     if (!fields.length) throw coded('EINVAL', 'nothing to change: give at least one of exercises, note, name, gym, date, start, duration_min')
     findWorkout(S0, args.workout_id)
@@ -246,8 +259,7 @@ export const lastPerformanceTool = {
   handler: async ({ exercise, gym, limit }) => {
     const S = getState()
     if (!S) throw noState()
-    await ensureNames(S)
-    const ex = resolveExercise(S, exercise)
+    const ex = await findExercise(S, exercise)
     const want = String(gym || '').trim().toLowerCase()
     const byId = new Map((S.workouts || []).map(w => [w.id, w]))
     const all = exerciseHistory(S, ex.id, { limit: 1000 }).sessions
@@ -294,9 +306,10 @@ export const addBodyweightTool = {
   },
   handler: async ({ weight, date }) => {
     needsWrites('add_bodyweight')
-    const { state, result, rev } = await mutate((S, ctx) => addBodyweight(S, { weight, date }, ctx), { label: 'add_bodyweight' })
+    const out = await mutate((S, ctx) => addBodyweight(S, { weight, date }, ctx), { label: 'add_bodyweight' })
+    const { state, result, rev } = out
     const goal = state.targetW || null
-    return { ok: true, unit: state.unit || 'kg', ...result, goal, delta_vs_goal: goal != null ? Math.round((result.entry.weight - goal) * 10) / 10 : null, rev }
+    return { ok: true, unit: state.unit || 'kg', ...result, goal, delta_vs_goal: goal != null ? Math.round((result.entry.weight - goal) * 10) / 10 : null, warnings: createdWarning(out, []), rev }
   }
 }
 
@@ -311,12 +324,11 @@ export const setExerciseNoteTool = {
   },
   handler: async ({ exercise, note }) => {
     needsWrites('set_exercise_note')
-    const S0 = getState()
-    if (!S0) throw noState()
-    await ensureNames(S0)
-    const ex = resolveExercise(S0, exercise)
-    const { result, rev } = await mutate(S => setExerciseNote(S, { id: ex.id, note }), { label: 'set_exercise_note' })
-    return { ok: true, exercise: exerciseRow(S0, ex), ...result, rev }
+    const S0 = current()
+    const ex = await findExercise(S0, exercise)
+    const out = await mutate(S => setExerciseNote(S, { id: ex.id, note }), { label: 'set_exercise_note' })
+    const { result, rev } = out
+    return { ok: true, exercise: exerciseRow(S0, ex), ...result, warnings: createdWarning(out, []), rev }
   }
 }
 
@@ -324,26 +336,27 @@ export const setExerciseNoteTool = {
 
 export const editRoutineTool = {
   name: 'edit_routine',
-  description: `Create a routine, change one (name, emoji, exercises, order, sets/reps/weight/rest targets, supersets) or delete one. To CHANGE a routine read get_routine first: \`exercises\`, when given, REPLACES the whole list in the order sent (a slot kept for the same exercise keeps settings the app stored that this tool does not know). To CREATE, omit \`routine\` and give name + exercises. To DELETE, pass remove: true and confirm: true after asking the user. Not for a one-off change to a session (log_workout / edit_active_workout) and not for what the app will prescribe (preview_session). Resolve exercise names with search_exercises (EAMBIG otherwise). Returns the routine as get_routine shows it. Requires remote mode. ${ERRORS}`,
+  description: `Create a routine, change one (name, emoji, exercises, order, sets/reps/weight/rest targets, supersets) or delete one. To CHANGE a routine read get_routine first: \`exercises\`, when given, REPLACES the whole list in the order sent. A slot kept for the same exercise keeps the settings this tool does not know (weight when none is sent, increment, pyramid…), but takes the shape the numbers given say: \`reps\` alone clears a stored rep range, and sec / min / reps move the slot to that mode and drop the other modes' numbers. To CREATE, omit \`routine\` and give name + exercises. To DELETE, pass remove: true and confirm: true after asking the user. Not for a one-off change to a session (log_workout / edit_active_workout) and not for what the app will prescribe (preview_session). Resolve exercise names with search_exercises (EAMBIG otherwise). Returns the routine as get_routine shows it. Requires remote mode. ${ERRORS}`,
   schema: {
     routine: z.string().optional().describe('Routine id or name to change or remove. Omit to create a new one.'),
     name: z.string().max(NAME_MAX).optional().describe('Routine name (required when creating).'),
     emoji: z.string().max(8).optional().describe('An emoji for the routine ("" clears it).'),
     exercises: z.array(routineExerciseSchema()).optional().describe('The full exercise list in order (replaces the current one).'),
     remove: z.boolean().optional().describe('true to delete the routine (with confirm: true).'),
-    confirm: z.boolean().optional().describe('Must be true with remove: the user confirmed.')
+    confirm: z.literal(true).optional().describe('Must be true with remove: the user confirmed.')
   },
   handler: async (args) => {
     needsWrites('edit_routine')
-    const S0 = getState()
-    if (!S0) throw noState()
+    const S0 = current()
     if (args.remove && args.confirm !== true) throw coded('EINVAL', 'deleting a routine needs confirm: true — ask the user first')
     const routine = args.routine ? resolveRoutine(S0, args.routine) : null
     if (!routine && !args.remove && !args.name) throw coded('EINVAL', 'to create a routine give a name (and exercises); to change one give its id or name as `routine`')
     const exercises = args.exercises ? await resolveAll(S0, args.exercises) : undefined
-    const { result, rev } = await mutate(S => editRoutine(S, { ...args, routine, exercises }, {}), { label: 'edit_routine' })
+    const out = await mutate(S => editRoutine(S, { ...args, routine, exercises }, {}), { label: 'edit_routine' })
+    const { result, rev } = out
     if (result.action === 'deleted') return { ok: true, action: 'deleted', routine: { id: result.routine.id, name: result.routine.name }, rev }
-    return { ok: true, action: result.action, routine: getRoutine.handler({ routine_id: result.routine.id }), rev }
+    // The read-back comes from the pushed document, which the cache now holds (state.js mutate).
+    return { ok: true, action: result.action, routine: getRoutine.handler({ routine_id: result.routine.id }), warnings: createdWarning(out, []), rev }
   }
 }
 

@@ -5,6 +5,7 @@
    instructions and the guide resource". */
 import { getState, getUser, getMode, writesEnabled } from './state.js'
 import { loadSession } from './session.js'
+import { localIso } from './schema.js'
 import { effortOf } from '../../frontend/src/lib/history.js'
 
 export const SERVER_NAME = 'opengym'
@@ -21,6 +22,9 @@ Rules:
   a tool that gets an ambiguous name fails with EAMBIG and a candidate list — ask, do not guess.
 - Weights are in the profile unit, totals on the bar or stack. Dates are YYYY-MM-DD, times
   HH:MM. A set is one row: w, r (reps), sec (timed), min + speed (cardio), rir or rpe, failure.
+- Dates and times are read in THIS SERVER's time zone (get_capabilities → clock.timezone and
+  clock.today). When it is not the user's zone, name the date explicitly rather than trusting
+  "today" late in the evening, and say the start time in the server's zone.
 - A finished session goes in one log_workout call. Use the session tools (start_workout,
   log_set, finish_workout) only when the user is reporting set by set as they train.
 - To fix a saved workout use update_workout with the full corrected exercise list; to fix a
@@ -74,6 +78,8 @@ export const WORKFLOWS = {
 
 export const LIMITATIONS = [
   'gym is stored on the workout and in its note; the app\'s screens do not show it as a field',
+  'dates and times are in this server\'s time zone (clock.timezone); set TZ on the server to the user\'s zone',
+  'a profile that never synced from a device has no document: the first write creates it with the app\'s defaults (unit kg) and says so in warnings',
   'a set given in plates is stored with a weight only when the exercise note carries "1 placa = X kg"',
   'writes are refused in file mode (set OPENGYM_URL and OPENGYM_TOKEN)',
   'an in-progress session lives on this server only; the phone\'s own running workout is separate — finishing both for the same training makes two records (delete_workout fixes it)'
@@ -109,7 +115,10 @@ export function capabilitiesOf(groups) {
     tools: { read: groups.read.map(row), write: groups.write.map(row), session: groups.session.map(row) },
     workflows: WORKFLOWS,
     limitations: LIMITATIONS,
-    units: { weight: S.unit || 'kg', speed: 'km/h', date: 'YYYY-MM-DD', time: 'HH:MM' }
+    units: { weight: S.unit || 'kg', speed: 'km/h', date: 'YYYY-MM-DD', time: 'HH:MM' },
+    // Every date this server reads or writes is local to it: the zone it runs in, and what
+    // "today" is there right now, so the agent can tell when that differs from the user's.
+    clock: { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || null, today: localIso(new Date()), now: new Date().toISOString() }
   }
 }
 

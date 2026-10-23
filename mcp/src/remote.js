@@ -47,13 +47,20 @@ async function parseBody(res) {
  *   me():     { user, token? }            — GET /api/me; a renewed token is adopted and persisted
  * Throws errors coded EAUTH / ECONFLICT / E2BIG / ENET / EIO (see docs/dev/MCP_WRITE.md).
  */
-export function createRemoteBackend({ url, token, tokenFile = null, fetchImpl = globalThis.fetch, log = m => console.error(m) } = {}) {
+// How often a long-running process asks GET /api/me again. The server renews a Bearer token only
+// once it is past half its life (SESSION_DAYS / 2), and only on that route — a process that asked
+// once at start and then ran for the token's whole life was refused on its last day with the
+// renewal never offered. Twice a day is well inside any SESSION_DAYS the server allows.
+export const ME_EVERY_MS = 12 * 60 * 60 * 1000
+
+export function createRemoteBackend({ url, token, tokenFile = null, fetchImpl = globalThis.fetch, log = m => console.error(m), clock = Date.now } = {}) {
   const base = baseOf(url)
   const fromFile = tokenFile ? readTokenFile(tokenFile) : null
   let bearer = (fromFile || token || '').trim()
   if (!bearer) throw coded('EAUTH', `no token for ${hostOf(base)}: set OPENGYM_TOKEN or OPENGYM_TOKEN_FILE (mint one with: node src/index.js pair <url> <code>)`)
   let user = null
   let hinted = false
+  let meAt = 0   // when GET /api/me last answered
 
   async function call(method, route, body) {
     let res
@@ -87,6 +94,7 @@ export function createRemoteBackend({ url, token, tokenFile = null, fetchImpl = 
   async function me() {
     const data = await call('GET', '/api/me')
     user = data.user || user
+    meAt = clock()
     adopt(data.token)
     return { user: data.user || null, token: data.token || null }
   }
@@ -97,7 +105,9 @@ export function createRemoteBackend({ url, token, tokenFile = null, fetchImpl = 
     get token() { return bearer },
     me,
     async read() {
-      if (!user) await me()
+      // The first read names the profile; later ones ask again every ME_EVERY_MS so a renewal
+      // the server offers is taken while the old token still works.
+      if (!user || clock() - meAt >= ME_EVERY_MS) await me()
       const data = await call('GET', '/api/data')
       const state = data.state && typeof data.state === 'object' ? data.state : null
       return { state, rev: Number(data.rev) || 0, wid: state?._wid || null, user }

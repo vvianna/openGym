@@ -75,7 +75,7 @@ async function resolveAll(S, exercises) {
 }
 
 // A set row as the LLM reads it back — the same shape get_workout's entries use.
-function rowView(e, s) {
+export function rowView(e, s) {
   const cfg = { ...(e.target || {}), id: e.id }
   return {
     done: !!s.done,
@@ -92,7 +92,7 @@ const nameOf = (S, id) => { const c = (S.customEx || []).find(x => x && x.id ===
 
 // One stored entry as the LLM reads it back: get_workout's shape plus the notes and effort
 // ratings a write carries, so what was sent can be checked against what was stored.
-function entryView(S, e) {
+export function entryView(S, e) {
   const custom = (S.customEx || []).find(x => x && x.id === e.id)
   const ex = custom || exOr(e.id)
   return {
@@ -108,7 +108,7 @@ function entryView(S, e) {
 
 // What every workout write answers with: the record read back from the pushed document (the
 // stored record, re-found by id in the state the server accepted).
-function workoutResult(S, w, { prs = [], e1rm = [], warnings = [], rev, extra = {} } = {}) {
+export function workoutResult(S, w, { prs = [], e1rm = [], warnings = [], rev, extra = {} } = {}) {
   const stored = findWorkout(S, w.id)
   return {
     ok: true,

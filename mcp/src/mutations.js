@@ -67,7 +67,7 @@ export function noteWithoutGym(gym, note) {
 // so a reps set has no `sec`, the way the app's rows are. `plates` is turned into a weight here
 // when the exercise note carries the factor; otherwise the row stores no weight and the caller
 // gets a warning.
-function rowOf(set, { factor, unit, exName }, warnings) {
+export function rowOf(set, { factor, unit, exName }, warnings) {
   if (set.plates != null && set.w != null) throw coded('EINVAL', `${exName}: give w or plates for a set, not both`)
   if (set.rir != null && set.rpe != null) throw coded('EINVAL', `${exName}: give rir or rpe for a set, not both`)
   if (!(num(set.r) > 0 || num(set.sec) > 0 || num(set.min) > 0)) throw coded('EINVAL', `${exName}: a set needs reps (r), seconds (sec) or minutes (min) above zero`)

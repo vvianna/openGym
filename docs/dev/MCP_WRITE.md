@@ -600,3 +600,66 @@ error), `E2BIG` mapping.
 
 `mcp/package.json` `version` → `0.2.0`, echoed by `get_capabilities.server.version` and the
 `McpServer` constructor.
+
+## After review
+
+The implementation went through an independent review and an end-to-end run against the real
+`api/server.js` before it landed (`mcp/test/e2e.test.js`). Both found behaviour this note had
+either under-specified or got wrong, and the fix phase changed it. The sections above are left as
+written; where one of them says otherwise, this section wins.
+
+- **A profile with no document yet is written, not refused.** *Access modes* and the tool
+  sections said every write throws `ENOENT` until a device has synced once. The server creates
+  the document on the first `PUT`, so a freshly paired account can be logged from the agent
+  straight away: `log_workout`, `add_bodyweight`, `set_exercise_note`, `edit_routine` and the
+  session tools run on the defaults (`unit kg`) and add a `warnings` entry saying the document
+  was created. `update_workout`, `delete_workout` and `last_performance` still need history and
+  keep `ENOENT`.
+- **An explicit `start` files in time order and never in the future.** `log_workout` with
+  `start` on today's date is inserted with `insertChronological` instead of appended (a 07:00
+  session logged after a phone's 12:00 one sorts first). `start` with no `duration_min` runs
+  until now — not 60 minutes, which could end after the clock. A `start` later than now, or an
+  end past now plus a minute of grace, is `EINVAL`. `finish_workout` clamps its default end to
+  now the same way.
+- **`finish_workout` is idempotent.** A draft whose id is already in `S.workouts` (the push
+  landed but the process died before the session file was removed) is recognised: no second
+  push, the stored record comes back with `already_saved: true`, the file is cleared. A failure
+  to clear the file after a successful push is a `warnings` entry, never a tool error.
+- **The token is renewed throughout a long run.** `GET /api/me` was asked only on the first
+  read; a process started with a fresh token and left running for `SESSION_DAYS` expired anyway.
+  It is now asked again whenever the last answer is older than 12 hours, and a renewed `token`
+  is adopted (and written to `OPENGYM_TOKEN_FILE`) as before.
+- **The clock zone is reported and `TZ` is documented.** Every date the server reads or writes
+  is the zone of the MCP process, which on a Docker host is usually UTC, not the user's. No date
+  math changed; `get_capabilities` reports `clock: { timezone, today, now }`, the `instructions`
+  tell the model so, and `mcp/README.md` puts `TZ` in both client config examples.
+- **`log_set` keeps per-side and intensifier rows.** A planned row with `sides` (unilateral)
+  gets the caller's weight and reps on both limbs — reps split evenly, an odd count is
+  `EINVAL` — through `syncSideAggregate`; a planned drop set or rest-pause row ticked without
+  numbers keeps its `drops` / `clusters`, and loses them with a warning when `w` or `r` is
+  given. The description says so.
+- **Warnings do not double on a 409 retry.** The mutation closures reset their `warnings`
+  array before each attempt.
+- **The cache is re-read after a write.** The pushed document serves the call's own read-back,
+  then the next tool call fetches again, so a server-side correction (`stampPut` putting a
+  field back, stored at `_rev + 2`) is never served from the cache.
+- **Session tools need a resolved profile in remote mode.** With the first `GET /api/me`
+  failed, the session file is no longer keyed by a null uid; the tool reports the remote error
+  (`EAUTH`, `ENET`) instead.
+- **`edit_routine` update semantics.** Sending `reps` for a slot that held a rep range clears
+  `reps_min` / `reps_max`; switching a slot's mode drops the other modes' fields; a stored
+  `weight` is kept when `weight` is omitted (it was zeroed). `confirm` is `z.literal(true)` on
+  the delete path, as on `delete_workout` and `discard_workout`.
+- **`update_workout.changed` names the input fields** (`date`, `start`, `duration_min`, …), not
+  internal ones.
+- **Search falls back to every language pack.** `search_exercises` and name resolution try the
+  profile language first (as *Resolving names* says) and, when nothing matches, every
+  `EXERCISE_NAME_LANGS` pack: "supino com barra" resolves on an English profile. A hit through
+  another language is flagged (`matched_other_language`), and on an ambiguous query only an
+  exact other-language name that is not also an English word may decide.
+- **What the user typed is never a property lookup.** `constructor`, `__proto__`, `toString`
+  and the like resolved to the catalogue index's own properties and produced an entry with no
+  id. Every lookup by user input goes through `Object.hasOwn` and a string-id check.
+- **The e2e suite is part of `npm test`.** It boots `api/server.js` as a child (so `api/`
+  dependencies must be installed, as CI's `test.yml` already does for the api job) and drives
+  the write and session tools in remote mode, including a 409 raced by a phone write.

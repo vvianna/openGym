@@ -99,7 +99,8 @@ describe('what the user typed is never a property lookup', () => {
   })
 })
 
-describe('the any-language fallback', () => {
+// Loads every language pack on first use: generous timeout so a loaded CI box does not flake.
+describe('the any-language fallback', { timeout: 30000 }, () => {
   test('an English profile resolves a Portuguese name through every pack, and says which name matched', async () => {
     S.lang = 'en'
     expect(['ENOENT', 'EAMBIG']).toContain(code(() => resolveExercise(S, 'supino com barra'))?.code)

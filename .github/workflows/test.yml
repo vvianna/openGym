@@ -77,6 +77,10 @@ jobs:
           cache-dependency-path: mcp/package-lock.json
       - run: npm ci
         working-directory: mcp
+      # mcp/test/e2e.test.js boots the real api/server.js as a child, so the api's own
+      # dependencies have to be installed too (docs/dev/MCP_WRITE.md).
+      - run: npm ci
+        working-directory: api
       - run: npm test
         working-directory: mcp
       # The one check the vitest suite structurally cannot make. The MCP server is a bare node

@@ -22,7 +22,13 @@ const LIB = new URL('../../frontend/src/lib/', import.meta.url)
 // which one, rather than which import chain.
 const MODULES = [
   'i18n-core.js', 'format.js', 'exercises.js', 'exercises-data.js',
-  'history.js', 'muscles.js', 'onerm.js', 'progression.js', 'queue.js'
+  'history.js', 'muscles.js', 'onerm.js', 'progression.js', 'queue.js',
+  // Phase 2 (write tools, docs/dev/MCP_WRITE.md): the app's own finish, edit, backfill, move,
+  // stamp and routine helpers, which the mutations reuse rather than reimplement.
+  'finish-workout.js', 'session-edit.js', 'backfill.js', 'workout-date.js', 'sync-merge.js',
+  'exercise-history.js', 'session-start.js', 'session-merge.js', 'rotation.js', 'routines.js',
+  'rep-range.js', 'dumbbells.js', 'workout-model.js', 'active-exercise-swap.js', 'active-workout-order.js',
+  '../exercise-names/pt-BR.js'
 ]
 
 let failed = 0
@@ -38,7 +44,7 @@ for (const m of MODULES) {
 
 // The real assertion: the server's own entry points, which pull the whole graph transitively.
 // A module added to the graph later is covered by this even if the list above never learns it.
-for (const entry of ['../src/state.js', '../src/tools.js']) {
+for (const entry of ['../src/state.js', '../src/tools.js', '../src/remote.js', '../src/mutations.js', '../src/exercise-search.js', '../src/write-tools.js', '../src/session.js', '../src/session-tools.js', '../src/capabilities.js']) {
   try {
     await import(new URL(entry, import.meta.url))
     console.log(`  ok    mcp/${entry.replace('../', '')}`)

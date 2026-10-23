@@ -17,9 +17,10 @@ frontend/  React 19 + Vite app (src/views, src/components, src/store, src/lib). 
 api/       backend — server.js (Node, no framework), deps: @simplewebauthn/server, web-push.
            coach/ is the optional AI coach; openapi.yaml documents every route.
 web/       multi-stage Dockerfile (builds frontend → nginx) + nginx.conf.template (serves app, proxies /api).
-mcp/       optional MCP server — read-only stdio bridge exposing a user's workouts/1RM/muscle
-           balance to LLM clients (Claude Desktop, Cursor…). Not part of the Docker build; only
-           runs when an LLM client spawns it.
+mcp/       optional MCP server — stdio bridge exposing a user's workouts/1RM/muscle balance to
+           LLM clients (Claude Desktop, Cursor, Hermes…); reads ./data directly, or reads AND
+           writes through the api with a paired token (log/correct workouts, live sessions,
+           weigh-ins, routines). Not part of the Docker build; only runs when a client spawns it.
 media/     exercise img/gif, gitignored, fetched at runtime by the `media` compose service.
 website/   static project site (plain HTML/CSS/JS), deployed separately.
 kubernetes/ example manifests (docs/SELF_HOSTING_KUBERNETES.md).
@@ -109,12 +110,16 @@ auto-generated into `data/vapid.json`) drives rest-timer-over and day-reminder n
 
 ### MCP server (`mcp/src`)
 
-Read-only stdio MCP bridge (`@modelcontextprotocol/sdk`) that lets an LLM client read a single
-user's routines/workouts/body-weight/1RM/muscle-balance directly from the same `DATA_DIR` the API
-writes to — no network call, no extra container. `state.js` loads/derives the data, `tools.js`
-defines the exposed MCP tools (zod-validated schemas), `labels.js` maps internal keys to
-human-readable labels, `index.js` wires it together. See `mcp/README.md` for the client-config
-side (Claude Desktop / Cursor).
+Stdio MCP bridge (`@modelcontextprotocol/sdk`) that lets an LLM client read a single user's
+routines/workouts/body-weight/1RM/muscle-balance — in file mode straight from the same `DATA_DIR`
+the API writes to (read-only), in remote mode (`OPENGYM_URL` + a paired Bearer token) through
+`GET`/`PUT /api/data`, which also enables the write tools. `state.js` loads the data and holds
+the one `mutate()` door (conditional PUT, one retry on 409), `tools.js` the read tools,
+`write-tools.js` / `session-tools.js` the write and live-session tools, `mutations.js` the pure
+state changes (built on the app's own finish/edit/backfill helpers), `exercise-search.js` name →
+id resolution, `capabilities.js` the LLM-facing overview and server instructions, `remote.js`
+the HTTP backend, `labels.js` maps internal keys to human-readable labels, `index.js` wires it
+together. Design note: `docs/dev/MCP_WRITE.md`; client config: `mcp/README.md`.
 
 ### Passkeys and self-hosting constraints
 
